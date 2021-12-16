@@ -1,3 +1,11 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+from scipy.special import softmax,expit
+import torch
+
+
 class BinaryTS:
 
     def __init__(self, d=10, T=10, N=10, true_A=None, true_B=None, true_sigma=None, R=10000):
@@ -59,7 +67,7 @@ class BinaryTS:
         p_data = np.zeros((N, self.d, T))
 
         self.z0 = np.random.randn(self.d, N)
-        p = softmax(self.z0, axis=0)
+        p = expit(self.z0)
         self.x0 = np.random.binomial(1, p, size=(self.d, N))
 
         x = self.x0
@@ -72,7 +80,7 @@ class BinaryTS:
         for t in np.arange(1, T):
             z = self.true_A @ x + self.true_B @ z + np.random.multivariate_normal(mean=np.zeros(self.d),
                                                                                   cov=self.true_sigma, size=N).T
-            p = softmax(z, axis=0)
+            p = expit(z)
             x = np.random.binomial(1, p, size=(self.d, N))
             x_data[:, :, t] = x.T
             z_data[:, :, t] = z.T
@@ -146,37 +154,31 @@ class BinaryTS:
         if save:
             plt.savefig('snapshot.pdf')
 
-    ### Functions for VEM ###
-
-    def variance_initialization(self):
+    def variance_initialization(self, random=False):
 
         """
-        Returns a random initialization for the diagonal and subdiagonal elements of the B matrix that
-        parametrizes the variational density, as a (self.d,2*self.T+1)-tensor. For every line d, the first
-        self.T+1 elements are the diagonal elements of the Cholesky decomposition of the precision matrix
-        of dimension d, while the next self.T elements are the subdiagonal elements.
+        Returns an initialization (at random or deterministic) for the diagonal and subdiagonal elements
+        of the B matrix that parametrizes the variational density, as a (self.d,2*self.T+1)-tensor.
+        For every line d, the first self.T+1 elements are the diagonal elements of the Cholesky decomposition
+        of the precision matrix of dimension d, while the next self.T elements are the subdiagonal elements.
 
         The precision matrices (there are d of them) can be obtained by calling
         self.compute_precision(self.form_B(self.variance_initialization())).
 
         """
+        if random is False:
+            return torch.ones(self.N, self.d, self.T - 1), torch.ones(self.N, self.d, self.T - 2)
+        else:
+            return torch.rand(self.N, self.d, self.T - 1), torch.rand(self.N, self.d, self.T - 2)
 
-        # return torch.rand(self.d,2*self.T+1)
-        return torch.ones(self.d, 2 * self.T - 1)
-
-    def form_B(self, nu,omega):
+    def form_B(self, nu, omega):
 
         """
-        Util function that forms the matrix
-        Given a (d,2*T-1)-tensor as input, forms a (d,T+1,T+1)-tensor structured as follows:
-            - for a given d, the diagonal elements of the (T+1,T+1) subtensor are the first T+1 elements
-            of nu_omega[d,:].
-            - for a given d, the subdiagonal elements of the (T+1,T+1) subtensor are the last T elements of
-            nu_omega[d,:].
-        """
+        Given a (N,d,T-1) nu-tensor and a (N,d,T-2) omega-tensor as inputs, forms a (N,d,T-1,T-1) tensor that
+        collects for every individual the (d,T-2,T-2) tensor that parametrizes the variance of her
+        variational density.
 
-        nu = nu_omega[:, :self.T]
-        omega = nu_omega[:, self.T:]
+        """
 
         B = torch.diag_embed(nu) + torch.diag_embed(omega, offset=1)
 
@@ -185,26 +187,22 @@ class BinaryTS:
     def compute_precision(self, B):
 
         """
-        Given a (d,self.T+1,self.T+1)-tensor of Cholesky decompositions that parametrizes the
-        variational density, returns the un-decomposed matrix.
-
-        Arguments:
-            - B: (d,T,T) tensor, where (i,:,:) is the Cholesky decomposition of the i-th precision matrix.
+        Given a (N,d,T-1,T-1) tensor as input formed by self.form_B, forms a (N,d,T-1,T-1) tensor that collects
+        for every individual the (d,T-2,T-2) tensor that collects all precision matrices for all dimensions by
+        recomposing the precision matrices from the Cholesky decomposition.
         """
 
-        return torch.transpose(B, dim0=1, dim1=2) @ B
+        return torch.transpose(B, dim0=2, dim1=3) @ B
 
-    def compute_covmat(self, B):
+    def compute_covmat(self, nu, omega):
 
         """
-        Computes the (self.d,self.T+1,self.T+1)-variance-covariance tensor, starting from
-        a (self.d,self.T+1,self.T+1)-Cholesky decomposition-tensor, in a differentiable way.
-
-        Arguments:
-            - B: (d,T,T) tensor, where (i,:,:) is the Cholesky decomposition of the i-th precision matrix.
+        Given a (N,d,T-1) nu-tensor and a (N,d,T-2) omega-tensor as inputs that parametrize the variance-covariances
+        of the variational distribution, computes the variance-covariance matrix, a (N,d,T-1,T-1) semidefinite positive
+        and symmetric tensor.
         """
 
-        return torch.linalg.inv(torch.transpose(B, dim0=1, dim1=2) @ B)
+        return torch.linalg.inv(self.compute_precision(self.form_B(nu, omega)))
 
     def check_data(self):
 
@@ -215,19 +213,14 @@ class BinaryTS:
         if self.data is None:
             raise ValueError('self.data is empty. Use self.sample(args,fixdata=True) to sample some data first.')
 
-    def full_log_expectation(self):
+    def log_expectation(self):
 
         """
-        For every t in [1,self.T], approximates the expectation of
+        For every of the (N,d,T-1) latent variable z, approximates the expectation
 
-                        $\log \sum_p \exp[\Omega_p^{(t,t)}X+\mu_{p,t}]$
+                                        E_z(log 1+exp(z))
 
-        through MCMC-approximation with self.R samples, where
-            - Omega_i^{(t,t)} is the (t,t)-th element of the variance-covariance matrix of the d-th dimension
-            of the variational density.
-            - mu_{p,t} is the (p,t)-th element of the expectation matrix of the variational density.
-
-        Returns a (self.T+1)-tensor.
+        via MCMC sampling with R samples. Returns a (N,d,T-1) tensor of approximated expectations.
 
         """
 
@@ -235,68 +228,29 @@ class BinaryTS:
         N = self.N
         d = self.d
         R = self.R
+        batch = self.batch
+        batchsize=self.batchsize
+        nu = self.var_approx[batch, :, :T - 1]
+        omega = self.var_approx[batch, :, T - 1:]
 
-        precision_matrix = self.compute_precision(self.form_B(self.var_approx))
-        covariance_matrix = self.compute_covmat(precision_matrix)
-        diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=1, dim2=2)
-        draw = torch.randn(self.R, self.d, self.T)
-        transformed_draw = diagonal_terms * draw + self.mu_approx
-        logsumexp_draw = torch.logsumexp(transformed_draw, dim=1)
+        # Compute covariance matrix of latent variables
+        covariance_matrix = self.compute_covmat(nu, omega)
 
-        if torch.any(torch.isnan(logsumexp_draw)):
-            print('Nans in full log approx')
+        # Extract the diagonal terms that correspond to the variance terms. These terms form a (N,d,T-1) tensor.
+        diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=2, dim2=3)
 
-        vector_approx = logsumexp_draw.mean()
-        sum_approx = vector_approx.sum()
+        # Take the square root of the terms for gaussian scaling.
 
-        return sum_approx
+        variance_scaled = torch.pow(diagonal_terms, 1 / 2)
 
-    def partial_log_expectation(self):
+        # Draw of random N(0,1) variables
 
-        """
-        For every i in [1,self.d] and every t in [0,self.T], approximates the expectation of
+        random_draw = torch.randn(R, batchsize, d, T - 1)
+        scaled_draw = torch.log(1+torch.exp(variance_scaled * random_draw + self.mu_approx[batch,:,:]))
 
-                        $\log \sum_{p \neq i} \exp[\Omega_{p}^{(t,t)}X+\mu_{p,t}]$
-
-        through MCMC-approximation with self.R samples, where
-            - Omega_i^{(t,t)} is the (t,t)-th element of the variance-covariance matrix of the d-th dimension
-            of the variational density.
-            - mu_{p,t} is the (p,t)-th element of the expectation matrix of the variational density.
-
-        Returns a (self.d,self.T+1)-tensor.
-
-        """
-
-        T = self.T
-        N = self.N
-        d = self.d
-        R = self.R
-
-        precision_matrix = self.compute_precision(self.form_B(self.var_approx))
-        covariance_matrix = self.compute_covmat(precision_matrix)
-        diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=1, dim2=2)
-        results = torch.zeros(self.d, self.T)
-
-        for i in np.arange(d):
-            draw = torch.randn(self.R, self.d, self.T)
-            mask = torch.ones(d)
-            mask[i] = 0
-            mask = mask.long()
-            masked_diagonal_terms = diagonal_terms[mask, :]
-            masked_mu_approx = self.mu_approx[mask, :]
-            transformed_draw = masked_diagonal_terms * draw + masked_mu_approx
-            logsumexp_draw = torch.logsumexp(transformed_draw, dim=1)
-            vector_approx = logsumexp_draw.mean()
-            results[i, :] = vector_approx
-
-        if torch.any(torch.isnan(results)):
-            print('Nans in partial log approx')
-
-        return results
+        return scaled_draw.mean(axis=0)
 
     def compute_bilinear_term(self):
-
-        self.check_data()
 
         T = self.T
         N = self.N
@@ -304,31 +258,37 @@ class BinaryTS:
         R = self.R
 
         batchsize = self.batchsize
-        batch = self.batch
+        batch=self.batch
 
         sigma_inv = self.sigma_inv
 
         data = torch.from_numpy(self.data).type(torch.FloatTensor)
 
-        result = batchsize * torch.trace(self.mu_approx[:, 1:].T @ sigma_inv @ (self.mu_approx[:, 1:]))
+        result = sum(
+            [torch.trace(self.mu_approx[i, :, :].T @ sigma_inv @ (self.mu_approx[i, :, :])) for i in batch])
+        result += -sum([torch.trace((self.mu_approx[i, :, 1:].T @ sigma_inv @ (self.A @ (data[i, :, :-1])))) for i in
+                        batch])
         result += -sum(
-            [torch.trace((self.mu_approx[:, 1:].T @ sigma_inv @ (self.A @ (data[i, :, :-1])))) for i in batch])
-        result += -batchsize * torch.trace(self.mu_approx[:, 1:].T @ sigma_inv @ self.B @ (self.mu_approx[:, :T - 1]))
-
-        result += -sum(
-            [torch.trace((self.A @ (data[i, :, :-1])).T @ sigma_inv @ (self.mu_approx[:, 1:])) for i in batch])
-        result += sum(
-            [torch.trace((self.A @ (data[i, :, :-1])).T @ sigma_inv @ (self.A @ (data[i, :, :-1]))) for i in batch])
-        result += sum(
-            [torch.trace((self.A @ (data[i, :, :-1])).T @ sigma_inv @ self.B @ (self.mu_approx[:, :-1])) for i in
+            [torch.trace(self.mu_approx[i, :, 1:].T @ sigma_inv @ self.B @ (self.mu_approx[i, :, :T - 1])) for i in
              batch])
 
-        result += -batchsize * torch.trace(self.mu_approx[:, :-1].T @ (self.B.T) @ sigma_inv @ (self.mu_approx[:, 1:]))
-        result += -sum(
-            [torch.trace((self.mu_approx[:, :-1].T @ (self.B.T) @ sigma_inv @ (self.A @ (data[i, :, :-1])))) for i in
+        result += -sum([torch.trace((self.A @ (data[i, :, :-1])).T @ sigma_inv @ (self.mu_approx[i, :, 1:])) for i in
+                        batch])
+        result += sum([torch.trace((self.A @ (data[i, :, :-1])).T @ sigma_inv @ (self.A @ (data[i, :, :-1]))) for i in
+                       batch])
+        result += sum(
+            [torch.trace((self.A @ (data[i, :, :-1])).T @ sigma_inv @ self.B @ (self.mu_approx[i, :, :-1])) for i in
              batch])
-        result += batchsize * torch.trace(
-            self.mu_approx[:, :-1].T @ (self.B.T) @ sigma_inv @ self.B @ (self.mu_approx[:, :-1]))
+
+        result += -sum(
+            [torch.trace(self.mu_approx[i, :, :-1].T @ (self.B.T) @ sigma_inv @ (self.mu_approx[i, :, 1:])) for i in
+             batch])
+        result += sum(
+            [torch.trace((self.mu_approx[i, :, :-1].T @ (self.B.T) @ sigma_inv @ (self.A @ (data[i, :, :-1])))) for i in
+             batch])
+        result += sum(
+            [torch.trace(self.mu_approx[i, :, :-1].T @ (self.B.T) @ sigma_inv @ self.B @ (self.mu_approx[i, :, :-1]))
+             for i in batch])
 
         result *= 1 / 2
 
@@ -340,67 +300,67 @@ class BinaryTS:
         Returns the Evidence Lower Bound (ELBO) of the model, normalized by 1/(N*T*d), as a pytorch tensor.
         """
 
-        self.check_data()
-
         T = self.T
         N = self.N
         d = self.d
         R = self.R
 
+        batchsize = self.batchsize
+        batch = self.batch
+
         self.construct_mu()
         self.construct_var()
 
-        batchsize = self.batchsize
-        self.batch = np.random.choice(N, batchsize, replace=False)
-        batch = self.batch
+        nu = self.var_approx[batch, :, :T - 1]
+        omega = self.var_approx[batch, :, T - 1:]
 
         sigma_inv = self.sigma_inv
         data = torch.from_numpy(self.data).type(torch.FloatTensor)
-        var_approx = self.form_B(self.var_approx)
-        covariance_matrix = self.compute_covmat(var_approx)
+        var_approx = self.compute_precision(self.form_B(nu, omega))
+        covariance_matrix = self.compute_covmat(nu, omega)
 
-        variational_entropy = 2 * batchsize * sum(
-            [sum(torch.log(torch.diag(var_approx[i, :, :]))) for i in np.arange(d)])
-
+        # Compute logdet of sigma_inv
         entropy = ((T - 1) * batchsize / 2) * torch.logdet(sigma_inv)
 
-        if torch.isnan(entropy):
-            print('entropy is nan')
-            print(self.sigma)
+        # Compute logdet of variational density
+
+        var_approx_logdet = torch.log(nu[:,:,:]).sum()
+
 
         # Compute bilinear term
 
         bilinear_term = self.compute_bilinear_term()
 
-        # Compute big sum with approximated expectations
+        # Compute data dependent sum and approximated expectation
 
-        mu_x_prod = sum([torch.trace(data[i, :, :].T @ self.mu_approx) for i in batch])
+        mu_x_prod = (self.mu_approx[batch,:,:] * data[batch, :, 1:]).sum()
 
-        full_log_approx = self.full_log_expectation()
-
-        big_sum = mu_x_prod - batchsize * d * full_log_approx
-
-        partial_log_approx = self.partial_log_expectation()
-
-        big_sum += -(data[batch, :, :] * partial_log_approx).sum() + batchsize * (partial_log_approx.sum())
+        expectation_approximation = self.log_expectation().sum()
 
         # Compute trace term
 
-        diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=1, dim2=2)
-        sub_diagonal_terms = torch.diagonal(covariance_matrix, offset=1, dim1=1, dim2=2)
+        diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=2, dim2=3)
+        sub_diagonal_terms = torch.diagonal(covariance_matrix, offset=1, dim1=2, dim2=3)
 
-        trace_term = (torch.diagonal(sigma_inv) * (diagonal_terms[:, 1:].sum(axis=1))).sum()
-        trace_term += (torch.diagonal(self.B.T @ sigma_inv @ self.B) * (diagonal_terms[:, :T - 1].sum(axis=1))).sum()
-        trace_term += -(torch.diagonal(sigma_inv @ self.B) * (sub_diagonal_terms.sum(axis=1))).sum()
-        trace_term += -(torch.diagonal(self.B.T @ sigma_inv) * (sub_diagonal_terms.sum(axis=1))).sum()
+        trace_term = sum(
+            [((torch.diagonal(sigma_inv)) * (diagonal_terms[i, :, 1:])).sum(axis=[0, 1]) for i in np.arange(batchsize)])
+        trace_term += sum(
+            [((torch.diagonal(self.B.T @ sigma_inv @ self.B)) * (diagonal_terms[i, :, :-1])).sum(axis=[0, 1]) for i in
+             np.arange(batchsize)])
+        trace_term += -sum(
+            [((torch.diagonal(sigma_inv @ self.B) * (sub_diagonal_terms[i, :, :]))).sum(axis=[0, 1]) for i in
+             np.arange(batchsize)])
+        trace_term += -sum(
+            [((torch.diagonal(self.B.T @ sigma_inv) * (sub_diagonal_terms[i, :, :]))).sum(axis=[0, 1]) for i in
+             np.arange(batchsize)])
 
-        trace_term = 1 / 2 * batchsize * trace_term
+        trace_term = 1 / 2 * trace_term
 
         # Put all terms together
 
-        elbo_value = variational_entropy + entropy + big_sum - bilinear_term - trace_term
+        elbo_value = entropy - 2 * var_approx_logdet + mu_x_prod - expectation_approximation - bilinear_term - trace_term
 
-        return (1 / (batchsize * (T - 1) * d)) * elbo_value
+        return (1 / batchsize) * elbo_value
 
     def define_tracks(self):
 
@@ -469,29 +429,27 @@ class BinaryTS:
 
             # Save predicted likelihood
 
-            self.predicted_likelihood_track = torch.cat(
-                (self.predicted_likelihood_track, torch.tensor([self.predictive_likelihood(N=100, T=50)])))
+            # self.predicted_likelihood_track = torch.cat((self.predicted_likelihood_track,torch.tensor([self.predictive_likelihood(N=100,T=50)])))
 
             # Save gradients
 
-            self.A_grad_track = torch.cat((self.A_grad_track, torch.tensor([torch.linalg.norm(self.A.grad)])))
-            self.B_grad_track = torch.cat((self.B_grad_track, torch.tensor([torch.linalg.norm(self.B.grad)])))
-            self.sigma_inv_grad_track = torch.cat(
-                (self.sigma_inv_grad_track, torch.tensor([torch.linalg.norm(self.sigma_inv.grad)])))
-            mu_grad = (sum([(self.mu_dic[key]["variable"].grad) ** 2 for key in self.mu_dic.keys()])) ** (1 / 2)
-            self.mu_approx_grad_track = torch.cat((self.mu_approx_grad_track, torch.tensor([mu_grad])))
-            var_grad = (sum([(self.var_dic[key]["variable"].grad) ** 2 for key in self.var_dic.keys()])) ** (1 / 2)
-            self.var_approx_grad_track = torch.cat((self.var_approx_grad_track, torch.tensor([var_grad])))
+            # self.A_grad_track = torch.cat((self.A_grad_track, torch.tensor([torch.linalg.norm(self.A.grad)])))
+            # self.B_grad_track = torch.cat((self.B_grad_track, torch.tensor([torch.linalg.norm(self.B.grad)])))
+            # self.sigma_inv_grad_track = torch.cat((self.sigma_inv_grad_track, torch.tensor([torch.linalg.norm(self.sigma_inv.grad)])))
+            # mu_grad = (sum([(self.mu_dic[key]["variable"].grad)**2 for key in self.mu_dic.keys()]))**(1/2)
+            # self.mu_approx_grad_track = torch.cat((self.mu_approx_grad_track, torch.tensor([mu_grad])))
+            # var_grad = (sum([(self.var_dic[key]["variable"].grad)**2 for key in self.var_dic.keys()]))**(1/2)
+            # self.var_approx_grad_track = torch.cat((self.var_approx_grad_track, torch.tensor([var_grad])))
 
             # Save mu_approx results
 
-            self.mu_approx_track = torch.cat((self.mu_approx_track, self.mu_approx))
+            # self.mu_approx_track = torch.cat((self.mu_approx_track,self.mu_approx))
 
             # Save var_approx results
 
-            cholesky_dec = self.form_B(self.var_approx)
-            precision_matrix = self.compute_precision(cholesky_dec)
-            self.var_approx_track = torch.cat((self.var_approx_track, precision_matrix))
+            # cholesky_dec = self.form_B(self.var_approx)
+            # precision_matrix = self.compute_precision(cholesky_dec)
+            # self.var_approx_track = torch.cat((self.var_approx_track,precision_matrix))
 
             # Save A results
 
@@ -511,54 +469,6 @@ class BinaryTS:
             sigma_inv_error = torch.tensor([torch.norm(torch.tensor(self.true_sigma_inv) - self.sigma_inv)])
             self.sigma_inv_error_track = torch.cat((self.sigma_inv_error_track, sigma_inv_error))
 
-    def predictive_likelihood(self, N, T):
-
-        """
-        Util function that computes the predicted likelihood (see companion paper).
-        """
-
-        with torch.no_grad():
-            x_test, z_test, _ = self.test_data
-            A = self.A.detach().numpy()
-            B = self.B.detach().numpy()
-            sigma = self.sigma.detach().numpy()
-
-            summed_likelihood = 0
-
-            for t in np.arange(1, self.testT):
-                z = np.matmul(A, x_test[:, :, t - 1].T) + np.matmul(B, z_test[:, :,
-                                                                       t - 1].T) + np.random.multivariate_normal(
-                    mean=np.zeros(self.d), cov=sigma, size=self.testN).T
-                p = np.log(softmax(z, axis=0))
-                likelihood = x_test[:, :, t].T * p + (1 - x_test[:, :, t].T * (1 - p))
-                summed_likelihood += likelihood.sum()
-
-        return (1 / (N * T)) * summed_likelihood
-
-    def true_predictive_likelihood(self, N, T):
-
-        """
-        Util function that computes the predicted likelihood (see companion paper).
-        """
-
-        with torch.no_grad():
-            x_test, z_test, _ = self.test_data
-            A = true_A
-            B = true_B
-            sigma = true_sigma
-
-            summed_likelihood = 0
-
-            for t in np.arange(1, self.testT):
-                z = np.matmul(A, x_test[:, :, t - 1].T) + np.matmul(B, z_test[:, :,
-                                                                       t - 1].T) + np.random.multivariate_normal(
-                    mean=np.zeros(self.d), cov=sigma, size=self.testN).T
-                p = np.log(softmax(z, axis=0))
-                likelihood = x_test[:, :, t].T * p + (1 - x_test[:, :, t].T * (1 - p))
-                summed_likelihood += likelihood.sum()
-
-        return (1 / (N * T)) * summed_likelihood
-
     def construct_mu(self):
 
         """
@@ -566,14 +476,20 @@ class BinaryTS:
         This is necessary to implement coordinate-ascent in Pytorch.
 
         """
+        T = self.T
+        N = self.N
+        d = self.d
+        R = self.R
 
-        self.mu_approx = torch.zeros((self.T) * self.d)
+        self.mu_approx = torch.zeros(self.N, (self.T - 1) * self.d)
 
-        for j in np.arange(0, (self.T) * self.d):
-            variable = self.mu_dic[str(j)]['variable']
-            self.mu_approx[j] = variable
+        for i in np.arange(self.N):
+            for j in np.arange(0, (self.T - 1) * self.d):
+                key = str(j)
+                variable = self.observations_dic[str(i)]['mean'][key]['variable']
+                self.mu_approx[i, j] = variable
 
-        self.mu_approx = self.mu_approx.reshape(d, self.T)
+        self.mu_approx = self.mu_approx.reshape(self.N, d, self.T - 1)
 
     def construct_var(self):
 
@@ -582,14 +498,20 @@ class BinaryTS:
         from the var_dic dictionnary. This is necessary to implement coordinate-ascent in Pytorch.
 
         """
+        T = self.T
+        N = self.N
+        d = self.d
+        R = self.R
 
-        self.var_approx = torch.zeros(self.d * (2 * self.T - 1))
+        self.var_approx = torch.zeros(self.N, self.d * (2 * self.T - 3))
 
-        for j in np.arange(0, (2 * self.T - 1) * self.d):
-            variable = self.var_dic[str(j)]['variable']
-            self.var_approx[j] = variable
+        for i in np.arange(self.N):
+            for j in np.arange(0, (2 * self.T - 3) * self.d):
+                key = str(j)
+                variable = self.observations_dic[str(i)]['variance'][key]['variable']
+                self.var_approx[i, j] = variable
 
-        self.var_approx = self.var_approx.reshape(d, 2 * self.T - 1)
+        self.var_approx = self.var_approx.reshape(self.N, d, 2 * self.T - 3)
 
     def cavi_optimizers(self, latent_lrs, mu_lr, var_lr):
 
@@ -601,13 +523,17 @@ class BinaryTS:
             - latent_dic, a dictionnary that contains self.A, self.B and self.sigma_inv
             and their optimization parameters (Pytorch optimizer and learning rate);
 
-            - mu_dic, a dictionnary that contains every variational mean parameter (there are (self.T+1)*d of them)
-            coded as a variable with its own Pytorch optimizer and learning rate;
-
-            - var_dic, a dictionnary that contains every variational variance parameter (there are (2*self.T+1)*d
-            of them) coded as a variable with its own Pytorch optimizer and learning rate.
+            - observations_dic, a dictionnary that contains, for every individual, a subdictionnary containing
+            their variational variables with associated PyTorch optimizers and learning rates. This dictionnary is
+            structured as follows: observations_dic <- For every N, an individual_dic <- For every individual_dic,
+            a var_approx_dic and a mu_approx_dic that contain all the variance and mean parameters.
 
         """
+
+        T = self.T
+        N = self.N
+        d = self.d
+        R = self.R
 
         self.latent_dic = {"A": {}, "B": {}, "sigma_inv": {}}
 
@@ -620,29 +546,40 @@ class BinaryTS:
             self.latent_dic[key]["optimizer"] = torch.optim.Adam([self.latent_dic[key]['variable']],
                                                                  lr=self.latent_dic[key]['lr'])
 
-        self.mu_dic = {}
+        self.observations_dic = {}
 
-        for i, line in enumerate(self.mu_approx):
-            for i_bis, coordinate in enumerate(line):
-                key = str(i * (self.T) + i_bis)
-                self.mu_dic[key] = {}
-                self.mu_dic[key]['variable'] = coordinate
+        # Mean and variance intializations happen here !
+        self.mu_approx = 2*torch.ones(N, d, T - 1)
+        self.var_approx = 2*torch.ones(N, d, 2 * T - 3)
 
-                self.mu_dic[key]['variable'].requires_grad = True
-                self.mu_dic[key]['optimizer'] = torch.optim.Adam([self.mu_dic[key]['variable']], lr=mu_lr)
+        for individual in np.arange(self.N):
+            individual = str(individual)
+            self.observations_dic[individual] = {}
+            self.observations_dic[individual]['mean'] = {}
+            self.observations_dic[individual]['variance'] = {}
+
+            for i, line in enumerate(self.mu_approx[int(individual), :, :]):
+                for k, coordinate in enumerate(line):
+                    key = str(i * (self.T - 1) + k)
+                    self.observations_dic[individual]['mean'][key] = {}
+                    self.observations_dic[individual]['mean'][key]['variable'] = coordinate
+                    self.observations_dic[individual]['mean'][key]['variable'].requires_grad = True
+                    self.observations_dic[individual]['mean'][key]['optimizer'] = torch.optim.Adam(
+                        [self.observations_dic[individual]['mean'][key]['variable']], lr=mu_lr)
+
+            for i, line in enumerate(self.var_approx[int(individual), :, :]):
+                for k, coordinate in enumerate(line):
+                    key = str(k + i * (2 * self.T - 3))
+                    self.observations_dic[individual]['variance'][key] = {}
+                    self.observations_dic[individual]['variance'][key]['variable'] = coordinate
+                    self.observations_dic[individual]['variance'][key]['variable'].requires_grad = True
+                    self.observations_dic[individual]['variance'][key]['optimizer'] = torch.optim.Adam(
+                        [self.observations_dic[individual]['variance'][key]['variable']], lr=mu_lr)
+
+        # These last two lines are necessary to convert the dictionnary into two tensors (one for mean and the other
+        # one for variance parameters).
 
         self.construct_mu()
-
-        self.var_dic = {}
-
-        for i, line in enumerate(self.var_approx):
-            for i_bis, coordinate in enumerate(line):
-                key = str(i_bis + i * (2 * self.T - 1))
-                self.var_dic[key] = {}
-                self.var_dic[key]['variable'] = coordinate
-                self.var_dic[key]['variable'].requires_grad = True
-                self.var_dic[key]['optimizer'] = torch.optim.Adam([self.var_dic[key]['variable']], lr=var_lr)
-
         self.construct_var()
 
     def block_cavi(self, latent_lrs=[1e-2, 1e-2, 1e-4], mu_lr=1e-2, var_lr=1e-2, max_iter=100, its=2, batchsize=2):
@@ -652,11 +589,11 @@ class BinaryTS:
 
         Arguments:
             - latent_lrs (list): learning rates for resp. A, B and sigma;
-
             - mu_lr (scalar > 0): learning rate for the variational density mean parameters;
-
             - var_lr (scalar > 0): learning rate for the variational density variance parameters.
-
+            - max_inter:  number of iterations of the full block-CAVI algorithm.
+            - its: steps taken for the update of every parameter.
+            - batchsize: batchsize for stochastic approximation of the gradient.
         """
 
         T = self.T
@@ -664,17 +601,9 @@ class BinaryTS:
         d = self.d
         R = self.R
 
-        self.batchsize = batchsize
+        self.batchsize=batchsize
 
         self.sample(N=N, T=T)
-
-        # Create test data
-        self.testN = 50
-        self.testT = 50
-
-        self.test_data = self.sample(N=self.testN, T=self.testT, fixdata=False)
-
-        self.true_pred_log = self.true_predictive_likelihood(N=self.testN, T=self.testT)
 
         # Parameters initialization
 
@@ -691,27 +620,14 @@ class BinaryTS:
         B.requires_grad = True
         self.B = B
 
-        print('data shape:', self.data.shape)
-
-        data_mean = self.data.mean(axis=0)
-        mu_approx = torch.from_numpy(data_mean)
-        mu_approx = mu_approx.float()
-        self.mu_approx = mu_approx
-        print(self.mu_approx.shape)
-
-        var_approx = self.variance_initialization()
-        self.var_approx = var_approx
-
-        print(self.var_approx)
-        print(self.var_approx.shape)
-        print(self.mu_approx)
-        print(self.mu_approx.shape)
-
         self.define_tracks()
 
+        # Calling self.cavi_optimizers(*args) also intializes the variational parameters.
         self.cavi_optimizers(latent_lrs, mu_lr, var_lr)
 
-        n_params = 3 + T * d + d * (2 * T - 1)
+        n_params = 3 + (T - 1) * d + d * (2 * T - 3)
+
+        self.grad_variance =[]
 
         print('-----------------------------------------')
         print('---------------------------------')
@@ -724,15 +640,16 @@ class BinaryTS:
         print('T: ', T)
         print('d: ', d)
         print('N: ', N)
+        print('Batchsize:', self.batchsize)
         print('\n')
         print('-------- Optimization parameters --------')
-        print('Batchsize: ', self.batchsize)
         print('\n')
+        print("Optimizer steps per parameter: ", its)
         print('Optimizer for A:', self.latent_dic['A']['optimizer'])
         print('Optimizer for B:', self.latent_dic['B']['optimizer'])
         print('Optimizer for sigma_inv:', self.latent_dic['sigma_inv']['optimizer'])
-        print('Optimizer for mu_approx:', self.mu_dic['0']['optimizer'])
-        print('Optimizer for var_approx:', self.var_dic['0']['optimizer'])
+        print('Optimizer for mu_approx:', self.observations_dic['0']['mean']['0']['optimizer'])
+        print('Optimizer for var_approx:', self.observations_dic['0']['variance']['0']['optimizer'])
         print('\n')
         print('-------------------')
         print('--------------------------')
@@ -749,6 +666,8 @@ class BinaryTS:
         for t in np.arange(max_iter):
 
             random_order = np.random.permutation(np.arange(n_params))
+            batch = np.random.randint(0,high=self.N,size=batchsize)
+            self.batch = batch
 
             for j in random_order:
 
@@ -763,45 +682,51 @@ class BinaryTS:
                         optimizer.step()
                         optimizer.zero_grad()
 
-                if j in np.arange(3, T * d + 3):
+                if j in np.arange(3, (T - 1) * d + 3):
 
                     j += - 3
-                    parameter = list(self.mu_dic.keys())[j]
-                    optimizer = self.mu_dic[parameter]["optimizer"]
-                    for it in np.arange(its):
-                        self.elbo = -self.compute_elbo()
-                        self.elbo.backward(retain_graph=True)
-                        optimizer.step()
-                        optimizer.zero_grad()
 
-                if j >= T * d + 3:
+                    for individual in batch:
 
-                    j += -(self.T * d + 3)
-                    parameter = list(self.var_dic.keys())[j]
-                    optimizer = self.var_dic[parameter]["optimizer"]
+                        parameter = list(self.observations_dic[str(individual)]['mean'].keys())[j]
+                        optimizer = self.observations_dic[str(individual)]['mean'][parameter]["optimizer"]
 
-                    for it in np.arange(its):
-                        self.elbo = -self.compute_elbo()
-                        self.elbo.backward(retain_graph=True)
-                        optimizer.step()
-                        optimizer.zero_grad()
+                        for it in np.arange(its):
+                            self.elbo = -self.compute_elbo()
+                            self.elbo.backward(retain_graph=True)
+                            optimizer.step()
+                            optimizer.zero_grad()
 
-                else:
+                if j >= (T - 1) * d + 3:
 
-                    pass
+                    j += -((T - 1) * d + 3)
+
+                    for individual in batch:
+
+                        parameter = list(self.observations_dic[str(individual)]['variance'].keys())[j]
+                        optimizer = self.observations_dic[str(individual)]['variance'][parameter]["optimizer"]
+
+                        for it in np.arange(its):
+                            self.elbo = -self.compute_elbo()
+                            self.elbo.backward(retain_graph=True)
+                            optimizer.step()
+                            optimizer.zero_grad()
 
             if t % 10 == 0 and t > 1:
                 print('---------- Iteration ', t, ' ---------- ')
 
                 print('Current ELBO value: ', -self.elbo)
 
-                print(
-                'Difference w. average of last 10 value (should be > 0): ', -self.elbo - self.elbo_track[-10:].mean())
+                print('Difference w. average of last 10 value (should be > 0): ', -self.elbo - self.elbo_track[-10:].mean())
 
-                print('Average of last 10 PL (should increase): ', self.predicted_likelihood_track[-10:].mean())
+                values=[]
+                for k in np.arange(100):
+                    with torch.no_grad():
+                        values.append(self.log_expectation().detach().numpy().sum())
+                self.grad_variance.append(np.var(values))
+
 
             self.save_results()
-            # print(self.predictive_likelihood(N=self.testN,T=self.testT))
 
         t2 = time.time()
 
