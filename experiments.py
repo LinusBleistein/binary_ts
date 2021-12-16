@@ -12,11 +12,6 @@ from scipy.special import softmax,expit
 import torch
 from torch.autograd import Variable
 
-# autoreload sets up auto reloading of modified .py modules
-import autoreload
-%load_ext autoreload
-%autoreload 2
-from utils import *
 from binary_ts import *
 
 d = 4
