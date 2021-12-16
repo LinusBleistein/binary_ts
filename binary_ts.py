@@ -342,17 +342,15 @@ class BinaryTS:
         diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=2, dim2=3)
         sub_diagonal_terms = torch.diagonal(covariance_matrix, offset=1, dim1=2, dim2=3)
 
-        trace_term = sum(
-            [((torch.diagonal(sigma_inv)) * (diagonal_terms[i, :, 1:])).sum(axis=[0, 1]) for i in np.arange(batchsize)])
-        trace_term += sum(
-            [((torch.diagonal(self.B.T @ sigma_inv @ self.B)) * (diagonal_terms[i, :, :-1])).sum(axis=[0, 1]) for i in
-             np.arange(batchsize)])
-        trace_term += -sum(
-            [((torch.diagonal(sigma_inv @ self.B) * (sub_diagonal_terms[i, :, :]))).sum(axis=[0, 1]) for i in
-             np.arange(batchsize)])
-        trace_term += -sum(
-            [((torch.diagonal(self.B.T @ sigma_inv) * (sub_diagonal_terms[i, :, :]))).sum(axis=[0, 1]) for i in
-             np.arange(batchsize)])
+        print(sigma_inv.shape)
+        print(diagonal_terms.shape)
+        print(sub_diagonal_terms.shape)
+
+        trace_term = sum((diagonal_terms[batch,:,1:].sum(axis=[0,2])*torch.diagonal(sigma_inv)))
+        print(trace_term)
+        trace_term += sum((diagonal_terms[batch,:,1:].sum(axis=[0,2]) * torch.diagonal(self.B.T @ sigma_inv @ self.B)))
+        trace_term += -sum((sub_diagonal_terms[batch,:,:].sum(axis=[0,2]) * torch.diagonal(sigma_inv @ self.B)))
+        trace_term += -sum((sub_diagonal_terms[batch,:,:].sum(axis=[0,2]) * torch.diagonal(self.B.T@sigma_inv )))
 
         trace_term = 1 / 2 * trace_term
 
