@@ -342,12 +342,7 @@ class BinaryTS:
         diagonal_terms = torch.diagonal(covariance_matrix, offset=0, dim1=2, dim2=3)
         sub_diagonal_terms = torch.diagonal(covariance_matrix, offset=1, dim1=2, dim2=3)
 
-        print(sigma_inv.shape)
-        print(diagonal_terms.shape)
-        print(sub_diagonal_terms.shape)
-
         trace_term = sum((diagonal_terms[batch,:,1:].sum(axis=[0,2])*torch.diagonal(sigma_inv)))
-        print(trace_term)
         trace_term += sum((diagonal_terms[batch,:,1:].sum(axis=[0,2]) * torch.diagonal(self.B.T @ sigma_inv @ self.B)))
         trace_term += -sum((sub_diagonal_terms[batch,:,:].sum(axis=[0,2]) * torch.diagonal(sigma_inv @ self.B)))
         trace_term += -sum((sub_diagonal_terms[batch,:,:].sum(axis=[0,2]) * torch.diagonal(self.B.T@sigma_inv )))
