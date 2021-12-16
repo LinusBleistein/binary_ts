@@ -15,7 +15,7 @@ from torch.autograd import Variable
 from binary_ts import *
 
 d = 4
-T = 5
+T = 4
 N = 100
 
 true_A = np.identity(d) + np.random.randn(d,d)
@@ -24,4 +24,4 @@ true_sigma = np.diag(np.random.uniform(low=1,high=4,size=d))
 
 bints = BinaryTS(d=d,T=T,N=N,true_A = true_A,true_B=true_B,true_sigma = true_sigma,R=1000)
 
-bints.block_cavi(latent_lrs=[1e-3,1e-3,1e-3],mu_lr=1e-4,var_lr=1e-4,max_iter=5000,its=200,batchsize=1)
+bints.block_cavi(latent_lrs=[1e-3,1e-3,1e-3],mu_lr=1e-4,var_lr=1e-4,max_iter=5000,its=200,batchsize=4)
