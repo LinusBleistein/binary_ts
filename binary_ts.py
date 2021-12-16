@@ -705,18 +705,13 @@ class BinaryTS:
                             optimizer.step()
                             optimizer.zero_grad()
 
-            if t % 10 == 0 and t > 1:
+            if t % 1 == 0 and t > 1:
                 print('---------- Iteration ', t, ' ---------- ')
 
                 print('Current ELBO value: ', -self.elbo)
 
                 print('Difference w. average of last 10 value (should be > 0): ', -self.elbo - self.elbo_track[-10:].mean())
 
-                values=[]
-                for k in np.arange(100):
-                    with torch.no_grad():
-                        values.append(self.log_expectation().detach().numpy().sum())
-                self.grad_variance.append(np.var(values))
 
 
             self.save_results()
