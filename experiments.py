@@ -14,8 +14,8 @@ from torch.autograd import Variable
 
 from binary_ts import *
 
-d = 3
-T = 3
+d = 2
+T = 2
 N = 10
 
 true_A = np.identity(d) + np.random.randn(d,d)
