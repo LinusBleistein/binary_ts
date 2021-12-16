@@ -14,9 +14,9 @@ from torch.autograd import Variable
 
 from binary_ts import *
 
-d = 2
-T = 2
-N = 100
+d = 4
+T = 5
+N = 30
 
 true_A = np.identity(d) + np.random.randn(d,d)
 true_B = np.diag(np.random.uniform(low=-0.8,high=0.8,size=d))
